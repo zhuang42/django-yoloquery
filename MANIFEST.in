@@ -1,0 +1,9 @@
+include README.md
+include LICENSE
+recursive-include django_yoloquery *.py *.typed
+recursive-exclude tests *
+recursive-exclude .github *
+recursive-exclude build *
+recursive-exclude dist *
+global-exclude __pycache__
+global-exclude *.py[co]
