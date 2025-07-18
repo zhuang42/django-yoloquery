@@ -194,6 +194,8 @@ DEFAULT_TYPE_LOOKUPS: Mapping[str, Set[str]] = {
     "BooleanField": {"exact", "isnull"},
     "DateField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull"},
     "DateTimeField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull"},
+    "DecimalField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
+    "FloatField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
     "ForeignKey": {"exact", "in", "isnull"},
     "OneToOneField": {"exact", "isnull"},
     "ManyToManyField": {"in", "isnull"},
@@ -489,14 +491,30 @@ class IntentCompiler:
     def _build_default_lookup_policy(self) -> Mapping[str, Sequence[str]]:
         policy: Dict[str, Sequence[str]] = {}
         for f in self.model._meta.get_fields():
-            if (
-                not getattr(f, "concrete", False)
-                or getattr(f, "many_to_many", False)
-                and not isinstance(f, models.ManyToManyField)
-            ):
-                continue
-            cat = _field_category(f)
-            policy[f.name] = list(DEFAULT_TYPE_LOOKUPS.get(cat, {"exact"}))
+            # Handle concrete fields (forward relationships and regular fields)
+            if getattr(f, "concrete", False):
+                if getattr(f, "many_to_many", False) and not isinstance(f, models.ManyToManyField):
+                    continue
+                cat = _field_category(f)
+                policy[f.name] = list(DEFAULT_TYPE_LOOKUPS.get(cat, {"exact"}))
+            # Handle reverse relationships (non-concrete fields)
+            elif getattr(f, "is_relation", False):
+                # For reverse relationships, allow basic operations including isnull
+                try:
+                    # Get the accessor name safely
+                    accessor_name = getattr(f, "get_accessor_name", lambda: None)()
+                    if accessor_name:
+                        # Different operations for different reverse relationship types
+                        if hasattr(f, "many_to_many") and f.many_to_many:
+                            # Reverse ManyToMany relationships
+                            policy[accessor_name] = ["in", "isnull"]
+                        else:
+                            # Reverse ForeignKey and OneToOne relationships
+                            policy[accessor_name] = ["exact", "in", "isnull"]
+                except Exception:
+                    # If we can't get accessor name, try the field name
+                    if hasattr(f, "name") and f.name:
+                        policy[f.name] = ["exact", "in", "isnull"]
         return policy
 
     def _resolve_path(self, path: FieldPath) -> Tuple[models.Field, str]:
@@ -511,18 +529,32 @@ class IntentCompiler:
                 lookup_suffix = "__".join(bits[i:])
                 break
             if getattr(field, "is_relation", False) and i < len(bits) - 1:
-                model = field.related_model
-            else:
-                continue
+                related_model = getattr(field, "related_model", None)
+                if related_model:
+                    model = related_model
+                else:
+                    lookup_suffix = "__".join(bits[i+1:])
+                    break
+            elif i < len(bits) - 1:
+                lookup_suffix = "__".join(bits[i+1:])
+                break
         if field is None:
             raise AIQueryModelMismatchError(path)
         return field, lookup_suffix
 
     def _validate_op(self, field: models.Field, op: str) -> str:
         op_lower = OP_ALIAS.get(op.lower(), op.lower())
-        allowed = {o.lower() for o in self.allow_lookups.get(field.name, [])}
-        if not allowed:
-            allowed = {o.lower() for o in DEFAULT_TYPE_LOOKUPS.get(_field_category(field), {"exact"})}
+
+        # For relationship traversal, be more permissive
+        if getattr(field, "is_relation", False):
+            # Allow basic operations on relationship fields
+            allowed = {"exact", "iexact", "icontains", "in", "isnull", "gt", "gte", "lt", "lte"}
+        else:
+            # Use the configured lookup policy
+            allowed = {o.lower() for o in self.allow_lookups.get(field.name, [])}
+            if not allowed:
+                allowed = {o.lower() for o in DEFAULT_TYPE_LOOKUPS.get(_field_category(field), {"exact"})}
+
         if op_lower not in allowed:
             raise AIQueryOperatorError(field.name, op_lower)
         return op_lower
@@ -540,11 +572,21 @@ class IntentCompiler:
             op = bits[-1].lower()
             path = "__".join(bits[:-1])
 
-        field, _ = self._resolve_path(path)
-        op = self._validate_op(field, op)
+        # For relationship traversal, we need to resolve the final field
+        final_field, lookup_suffix = self._resolve_path(path)
+
+        # If there's a lookup suffix, use the original path for the query
+        # but validate against the final field
+        if lookup_suffix:
+            # This means we have a relationship traversal
+            # The validation should be against the final field type
+            op = self._validate_op(final_field, op)
+        else:
+            # Direct field access
+            op = self._validate_op(final_field, op)
 
         if op == "ne":
-            coerced = _coerce_value(field, value)
+            coerced = _coerce_value(final_field, value)
             return ~Q(**{f"{path}__exact": coerced})
 
         if op == "isnull":
@@ -556,17 +598,17 @@ class IntentCompiler:
         if op == "in":
             if not isinstance(value, (list, tuple)):
                 value = [value]
-            coerced = [_coerce_value(field, v) for v in value]
+            coerced = [_coerce_value(final_field, v) for v in value]
             return Q(**{f"{path}__in": coerced})
 
         if op == "range":
             if not (isinstance(value, (list, tuple)) and len(value) == 2):
-                raise AIQueryValueError(field.name, value, msg="'range' expects [start,end]")
-            start = _coerce_value(field, value[0])
-            end = _coerce_value(field, value[1])
+                raise AIQueryValueError(final_field.name, value, msg="'range' expects [start,end]")
+            start = _coerce_value(final_field, value[0])
+            end = _coerce_value(final_field, value[1])
             return Q(**{f"{path}__range": (start, end)})
 
-        coerced = _coerce_value(field, value)
+        coerced = _coerce_value(final_field, value)
         return Q(**{f"{path}__{op}": coerced})
 
     def compile(self, intent: IntentSpec) -> Q:
