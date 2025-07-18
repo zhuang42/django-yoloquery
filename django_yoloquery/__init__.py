@@ -183,22 +183,22 @@ class IntentSpec:
 
 
 DEFAULT_TYPE_LOOKUPS: Mapping[str, Set[str]] = {
-    "CharField": {"exact", "iexact", "icontains", "istartswith", "iendswith", "in", "isnull"},
-    "TextField": {"icontains", "iexact", "in", "isnull"},
-    "EmailField": {"iexact", "icontains", "in", "isnull"},
-    "SlugField": {"iexact", "icontains", "in", "isnull"},
-    "UUIDField": {"exact", "in", "isnull"},
-    "IntegerField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
-    "BigIntegerField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
-    "AutoField": {"exact", "in"},
-    "BooleanField": {"exact", "isnull"},
-    "DateField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull"},
-    "DateTimeField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull"},
-    "DecimalField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
-    "FloatField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull"},
-    "ForeignKey": {"exact", "in", "isnull"},
-    "OneToOneField": {"exact", "isnull"},
-    "ManyToManyField": {"in", "isnull"},
+    "CharField": {"exact", "iexact", "icontains", "istartswith", "iendswith", "in", "isnull", "ne"},
+    "TextField": {"icontains", "iexact", "in", "isnull", "ne"},
+    "EmailField": {"iexact", "icontains", "in", "isnull", "ne"},
+    "SlugField": {"iexact", "icontains", "in", "isnull", "ne"},
+    "UUIDField": {"exact", "in", "isnull", "ne"},
+    "IntegerField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull", "ne"},
+    "BigIntegerField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull", "ne"},
+    "AutoField": {"exact", "in", "ne"},
+    "BooleanField": {"exact", "isnull", "ne"},
+    "DateField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull", "ne"},
+    "DateTimeField": {"exact", "gt", "gte", "lt", "lte", "range", "isnull", "ne"},
+    "DecimalField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull", "ne"},
+    "FloatField": {"exact", "gt", "gte", "lt", "lte", "in", "isnull", "ne"},
+    "ForeignKey": {"exact", "in", "isnull", "ne"},
+    "OneToOneField": {"exact", "isnull", "ne"},
+    "ManyToManyField": {"in", "isnull", "ne"},
 }
 
 OP_ALIAS: Mapping[str, str] = {
@@ -548,7 +548,7 @@ class IntentCompiler:
         # For relationship traversal, be more permissive
         if getattr(field, "is_relation", False):
             # Allow basic operations on relationship fields
-            allowed = {"exact", "iexact", "icontains", "in", "isnull", "gt", "gte", "lt", "lte"}
+            allowed = {"exact", "iexact", "icontains", "in", "isnull", "gt", "gte", "lt", "lte", "ne"}
         else:
             # Use the configured lookup policy
             allowed = {o.lower() for o in self.allow_lookups.get(field.name, [])}
@@ -586,6 +586,9 @@ class IntentCompiler:
             op = self._validate_op(final_field, op)
 
         if op == "ne":
+            # Handle null values specially for negation
+            if value is None:
+                return Q(**{f"{path}__isnull": False})
             coerced = _coerce_value(final_field, value)
             return ~Q(**{f"{path}__exact": coerced})
 
